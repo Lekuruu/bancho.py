@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import secrets
+from pathlib import Path
 
 import httpx
 import respx
@@ -505,3 +506,62 @@ async def test_v2_session_creation_rejects_invalid_credentials(
         "status": "error",
         "error": "Incorrect username or password.",
     }
+
+
+_PNG_AVATAR = b"\x89PNG\r\n\x1a\n" + b"avatar bytes" + b"\x49END\xae\x42\x60\x82"
+
+
+async def test_v2_player_avatar_upload_lifecycle(
+    http_client: AsyncClient,
+    respx_mock: respx.MockRouter,
+) -> None:
+    _mock_out_geolocation(respx_mock)
+    username = f"web-{secrets.token_hex(4)}"
+    password = "myPassword321$"
+    player_id = await _register_account(
+        http_client,
+        username=username,
+        password=password,
+    )
+
+    # uploading requires authentication
+    response = await http_client.put(
+        f"/v2/players/{player_id}/avatar",
+        headers=API_HEADERS,
+        files={"avatar_file": ("avatar.png", _PNG_AVATAR, "image/png")},
+    )
+    assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+    login_response = await http_client.post(
+        "/v2/sessions",
+        headers=API_HEADERS,
+        json={"username": username, "password": password},
+    )
+    assert login_response.status_code == status.HTTP_201_CREATED
+
+    # players may only update their own avatar
+    response = await http_client.put(
+        f"/v2/players/{player_id + 1}/avatar",
+        headers=API_HEADERS,
+        files={"avatar_file": ("avatar.png", _PNG_AVATAR, "image/png")},
+    )
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+
+    # non-image files are rejected
+    response = await http_client.put(
+        f"/v2/players/{player_id}/avatar",
+        headers=API_HEADERS,
+        files={"avatar_file": ("avatar.png", b"not an image", "image/png")},
+    )
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    # a valid image is stored where the avatar server serves from
+    response = await http_client.put(
+        f"/v2/players/{player_id}/avatar",
+        headers=API_HEADERS,
+        files={"avatar_file": ("avatar.png", _PNG_AVATAR, "image/png")},
+    )
+    assert response.status_code == status.HTTP_200_OK
+
+    avatar_path = Path.cwd() / ".data/avatars" / f"{player_id}.png"
+    assert avatar_path.read_bytes() == _PNG_AVATAR
