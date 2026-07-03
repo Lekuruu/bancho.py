@@ -5,7 +5,9 @@
 [![pre-commit.ci status](https://results.pre-commit.ci/badge/github/osuAkatsuki/bancho.py/master.svg)](https://results.pre-commit.ci/latest/github/osuAkatsuki/bancho.py/master)
 [![Discord](https://discordapp.com/api/guilds/748687781605408908/widget.png?style=shield)](https://discord.gg/ShEQgUx)
 
-**bancho.py** is an private osu! server backend for developers of all levels
+English · [简体中文](README_CN.md) · [Italiano](README_IT.md) · [Deutsch](README_DE.md) · [Русский](README_RU.md)
+
+**bancho.py** is a private osu! server backend for developers of all levels
 of experience interested in hosting their own osu private server instance(s).
 
 the project is developed primarily by the [Akatsuki](https://akatsuki.gg/) team,
@@ -15,6 +17,17 @@ than the tech stack used by Akatsuki.gg, while maintaining all core features, an
 still retaining the ability to reach a large number of concurrent online users.
 
 If you are interested in running or contributing to **bancho.py**, you should head over to the **[bancho.py wiki](https://github.com/osuAkatsuki/bancho.py/wiki)**.
+
+## Web frontend
+
+**bancho.py** is a backend server — it does not include a website. To pair it with one:
+
+- **[bancho-web.ts](https://github.com/osuAkatsuki/bancho-web.ts)** (recommended) — a modern
+  React + TypeScript frontend built on bancho.py's v2 api, with leaderboards, player profiles,
+  beatmap pages, clans, player search, and website registration & login (with optional captcha
+  support). Maintained by the bancho.py team.
+- **[guweb](https://github.com/varkaria/guweb)** (alternative) — the long-standing
+  community-maintained python frontend, which talks directly to bancho.py's database.
 
 ## License
 
