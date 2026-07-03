@@ -5,7 +5,27 @@ from types import SimpleNamespace
 import pytest
 
 import app.services.players as players
-from app.constants.gamemodes import GameMode
+
+
+def _stat(mode: int = 0) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=3,
+        mode=mode,
+        tscore=1000,
+        rscore=800,
+        pp=500,
+        plays=25,
+        playtime=3600,
+        acc=98.76,
+        max_combo=512,
+        total_hits=1234,
+        replay_views=10,
+        xh_count=1,
+        x_count=2,
+        sh_count=3,
+        s_count=4,
+        a_count=5,
+    )
 
 
 class _FakeUsersRepository:
@@ -33,39 +53,19 @@ class _FakeUsersRepository:
 
 
 class _FakeStatsRepository:
-    def __init__(self) -> None:
-        self.leaderboard_calls: list[dict[str, object | None]] = []
+    async def fetch_one(self, player_id: int, mode: int) -> SimpleNamespace | None:
+        return _stat(mode) if mode in (0, 4) else None
 
     async def fetch_many(
         self,
         player_id: int | None = None,
         page: int | None = None,
         page_size: int | None = None,
-    ) -> list[dict[str, object]]:
-        return [{"id": player_id or 0, "mode": 0}]
+    ) -> list[SimpleNamespace]:
+        return [_stat(0), _stat(4)]
 
     async def fetch_count(self, player_id: int | None = None) -> int:
-        return 1 if player_id is not None else 0
-
-    async def fetch_leaderboard_stats_rows(
-        self,
-        *,
-        sort: str,
-        mode: int,
-        limit: int,
-        offset: int,
-        country: str | None,
-    ) -> list[dict[str, object]]:
-        self.leaderboard_calls.append(
-            {
-                "sort": sort,
-                "mode": mode,
-                "limit": limit,
-                "offset": offset,
-                "country": country,
-            },
-        )
-        return [{"player_id": 3, "pp": 500}]
+        return 2 if player_id is not None else 0
 
 
 class _FakeOnlinePlayers:
@@ -93,11 +93,37 @@ class _FakeOnlinePlayers:
         return self.player
 
 
-def _service() -> players.PlayersService:
+class _FakePlayerLeaderboardsService:
+    def __init__(self, ranks: players.ModeRanks | None = None) -> None:
+        self.ranks = (
+            ranks
+            if ranks is not None
+            else players.ModeRanks(global_rank=None, country_rank=None)
+        )
+        self.calls: list[dict[str, object]] = []
+
+    async def fetch_player_mode_ranks(
+        self,
+        *,
+        player_id: int,
+        mode: int,
+        country: str,
+    ) -> players.ModeRanks:
+        self.calls.append({"player_id": player_id, "mode": mode, "country": country})
+        return self.ranks
+
+
+def _service(
+    player_leaderboards: _FakePlayerLeaderboardsService | None = None,
+) -> players.PlayersService:
+    if player_leaderboards is None:
+        player_leaderboards = _FakePlayerLeaderboardsService()
+
     return players.PlayersService(
         users=_FakeUsersRepository(),
         stats=_FakeStatsRepository(),
         online_players=_FakeOnlinePlayers(),
+        player_leaderboards=player_leaderboards,
     )
 
 
@@ -158,24 +184,57 @@ async def test_players_service_fetches_online_and_cached_player_sessions() -> No
     ]
 
 
-async def test_players_service_fetches_global_leaderboard() -> None:
-    service = _service()
+async def test_players_service_composes_mode_stats_with_ranks() -> None:
+    player_leaderboards = _FakePlayerLeaderboardsService(
+        ranks=players.ModeRanks(global_rank=4, country_rank=2),
+    )
+    service = _service(player_leaderboards=player_leaderboards)
 
-    rows = await service.fetch_global_leaderboard(
-        sort="pp",
-        mode=GameMode.VANILLA_OSU,
-        limit=50,
-        offset=10,
+    ranked = await service.fetch_player_mode_stats_with_ranks(
+        player_id=3,
+        mode=0,
         country="ca",
     )
 
-    assert rows == [{"player_id": 3, "pp": 500}]
-    assert service.stats.leaderboard_calls == [
-        {
-            "sort": "pp",
-            "mode": 0,
-            "limit": 50,
-            "offset": 10,
-            "country": "ca",
-        },
+    assert ranked is not None
+    assert ranked.pp == 500
+    assert ranked.rank == 4
+    assert ranked.country_rank == 2
+    assert player_leaderboards.calls == [
+        {"player_id": 3, "mode": 0, "country": "ca"},
+    ]
+
+
+async def test_players_service_returns_none_for_missing_mode_stats() -> None:
+    service = _service()
+
+    ranked = await service.fetch_player_mode_stats_with_ranks(
+        player_id=3,
+        mode=1,
+        country="ca",
+    )
+
+    assert ranked is None
+
+
+async def test_players_service_lists_all_mode_stats_with_ranks() -> None:
+    player_leaderboards = _FakePlayerLeaderboardsService(
+        ranks=players.ModeRanks(global_rank=7, country_rank=None),
+    )
+    service = _service(player_leaderboards=player_leaderboards)
+
+    listing = await service.fetch_player_stats_with_ranks(
+        player_id=3,
+        country="ca",
+        page=1,
+        page_size=50,
+    )
+
+    assert listing.total_stats == 2
+    assert [stat.mode for stat in listing.stats] == [0, 4]
+    assert all(stat.rank == 7 for stat in listing.stats)
+    assert all(stat.country_rank is None for stat in listing.stats)
+    assert player_leaderboards.calls == [
+        {"player_id": 3, "mode": 0, "country": "ca"},
+        {"player_id": 3, "mode": 4, "country": "ca"},
     ]

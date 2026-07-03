@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Annotated
+from typing import Literal
 
 from fastapi import APIRouter
 from fastapi import Depends
@@ -11,10 +13,15 @@ from fastapi.param_functions import Query
 
 from app.api import dependencies as api_dependencies
 from app.api.v2.common import responses
+from app.api.v2.common.parameters import GameModeParam
 from app.api.v2.common.responses import Failure
 from app.api.v2.common.responses import Success
 from app.api.v2.models.maps import Map
+from app.api.v2.models.scores import MapScore
+from app.api.v2.models.scores import ScorePlayer
+from app.constants.gamemodes import GameMode
 from app.services.maps import MapsService
+from app.services.scores import ScoresService
 
 router = APIRouter()
 
@@ -79,3 +86,62 @@ async def get_map(
 
     response = Map.model_validate(data)
     return responses.success(response)
+
+
+@router.get("/maps/{map_id}/scores")
+async def get_map_scores(
+    map_id: int,
+    *,
+    scope: Literal["best", "recent"] = "best",
+    mode: GameModeParam = Query(0),
+    limit: int = Query(50, ge=1, le=100),
+    maps_service: Annotated[
+        MapsService,
+        Depends(api_dependencies.get_maps_service),
+    ],
+    scores_service: Annotated[
+        ScoresService,
+        Depends(api_dependencies.get_scores_service),
+    ],
+) -> Success[list[MapScore]] | Failure:
+    bmap = await maps_service.fetch_map(map_id)
+    if bmap is None:
+        return responses.failure(
+            message="Map not found.",
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+    scores = await scores_service.fetch_map_scores(
+        map_md5=bmap.md5,
+        mode=GameMode(mode),
+        mods=None,
+        strong_mods_equality=True,
+        scope=scope,
+        limit=limit,
+    )
+
+    response = [
+        MapScore.model_validate(
+            {
+                **dataclasses.asdict(rec),
+                "player": ScorePlayer(
+                    id=rec.userid,
+                    name=rec.player_name,
+                    country=rec.player_country,
+                    clan_id=rec.clan_id,
+                    clan_name=rec.clan_name,
+                    clan_tag=rec.clan_tag,
+                ),
+            },
+        )
+        for rec in scores
+    ]
+
+    return responses.success(
+        content=response,
+        meta={
+            "total": len(response),
+            "scope": scope,
+            "mode": mode,
+        },
+    )

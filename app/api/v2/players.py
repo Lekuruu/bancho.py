@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Annotated
+from typing import Literal
 
 from fastapi import APIRouter
 from fastapi import Depends
@@ -11,12 +13,19 @@ from fastapi.param_functions import Query
 
 from app.api import dependencies as api_dependencies
 from app.api.v2.common import responses
+from app.api.v2.common.parameters import GameModeParam
 from app.api.v2.common.responses import Failure
 from app.api.v2.common.responses import Success
+from app.api.v2.models.maps import MostPlayedMap
 from app.api.v2.models.players import Player
 from app.api.v2.models.players import PlayerStats
 from app.api.v2.models.players import PlayerStatus
+from app.api.v2.models.players import SearchPlayer
+from app.api.v2.models.scores import PlayerScore
+from app.api.v2.models.scores import ScoreBeatmap
+from app.constants.gamemodes import GameMode
 from app.services.players import PlayersService
+from app.services.scores import ScoresService
 
 router = APIRouter()
 
@@ -57,6 +66,24 @@ async def get_players(
             "page": page,
             "page_size": page_size,
         },
+    )
+
+
+@router.get("/players/search")
+async def search_players(
+    *,
+    query: str = Query(..., alias="q", min_length=2, max_length=32),
+    players_service: Annotated[
+        PlayersService,
+        Depends(api_dependencies.get_players_service),
+    ],
+) -> Success[list[SearchPlayer]] | Failure:
+    players = await players_service.search_public_players(query)
+
+    response = [SearchPlayer.model_validate(rec) for rec in players]
+    return responses.success(
+        content=response,
+        meta={"total": len(response)},
     )
 
 
@@ -114,9 +141,17 @@ async def get_player_mode_stats(
         Depends(api_dependencies.get_players_service),
     ],
 ) -> Success[PlayerStats] | Failure:
-    data = await players_service.fetch_player_mode_stats(
+    player = await players_service.fetch_player(player_id)
+    if player is None:
+        return responses.failure(
+            message="Player not found.",
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+    data = await players_service.fetch_player_mode_stats_with_ranks(
         player_id=player_id,
         mode=mode,
+        country=player.country,
     )
     if data is None:
         return responses.failure(
@@ -139,18 +174,125 @@ async def get_player_stats(
         Depends(api_dependencies.get_players_service),
     ],
 ) -> Success[list[PlayerStats]] | Failure:
-    listing = await players_service.fetch_player_stats(
+    player = await players_service.fetch_player(player_id)
+    if player is None:
+        return responses.failure(
+            message="Player not found.",
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+    listing = await players_service.fetch_player_stats_with_ranks(
         player_id=player_id,
+        country=player.country,
         page=page,
         page_size=page_size,
     )
 
     response = [PlayerStats.model_validate(rec) for rec in listing.stats]
+
     return responses.success(
         response,
         meta={
             "total": listing.total_stats,
             "page": page,
             "page_size": page_size,
+        },
+    )
+
+
+@router.get("/players/{player_id}/scores")
+async def get_player_scores(
+    player_id: int,
+    *,
+    scope: Literal["best", "recent"] = "best",
+    mode: GameModeParam = Query(0),
+    limit: int = Query(25, ge=1, le=100),
+    include_loved: bool = False,
+    include_failed: bool = True,
+    players_service: Annotated[
+        PlayersService,
+        Depends(api_dependencies.get_players_service),
+    ],
+    scores_service: Annotated[
+        ScoresService,
+        Depends(api_dependencies.get_scores_service),
+    ],
+) -> Success[list[PlayerScore]] | Failure:
+    player = await players_service.fetch_player(player_id)
+    if player is None:
+        return responses.failure(
+            message="Player not found.",
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+    scores = await scores_service.fetch_player_scores(
+        player_id=player_id,
+        mode=GameMode(mode),
+        mods=None,
+        strong_mods_equality=True,
+        scope=scope,
+        limit=limit,
+        include_loved=include_loved,
+        include_failed=include_failed,
+    )
+
+    response = [
+        PlayerScore.model_validate(
+            {
+                **dataclasses.asdict(row.score),
+                "beatmap": (
+                    ScoreBeatmap.model_validate(row.beatmap)
+                    if row.beatmap is not None
+                    else None
+                ),
+            },
+        )
+        for row in scores
+    ]
+
+    return responses.success(
+        content=response,
+        meta={
+            "total": len(response),
+            "scope": scope,
+            "mode": mode,
+        },
+    )
+
+
+@router.get("/players/{player_id}/most_played")
+async def get_player_most_played(
+    player_id: int,
+    *,
+    mode: GameModeParam = Query(0),
+    limit: int = Query(25, ge=1, le=100),
+    players_service: Annotated[
+        PlayersService,
+        Depends(api_dependencies.get_players_service),
+    ],
+    scores_service: Annotated[
+        ScoresService,
+        Depends(api_dependencies.get_scores_service),
+    ],
+) -> Success[list[MostPlayedMap]] | Failure:
+    player = await players_service.fetch_player(player_id)
+    if player is None:
+        return responses.failure(
+            message="Player not found.",
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+    maps = await scores_service.fetch_player_most_played(
+        player_id=player_id,
+        mode=GameMode(mode),
+        limit=limit,
+    )
+
+    response = [MostPlayedMap.model_validate(rec) for rec in maps]
+    return responses.success(
+        content=response,
+        meta={
+            "total": len(response),
+            "mode": mode,
         },
     )

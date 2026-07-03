@@ -24,6 +24,7 @@ from app.repositories.client_hashes import ClientHashesRepository
 from app.repositories.comments import CommentsRepository
 from app.repositories.favourites import FavouritesRepository
 from app.repositories.ingame_logins import IngameLoginsRepository
+from app.repositories.leaderboard_ranks import LeaderboardRanksRepository
 from app.repositories.mail import MailRepository
 from app.repositories.maps import MapsRepository
 from app.repositories.ratings import RatingsRepository
@@ -49,6 +50,7 @@ from app.services.maps import BeatmapRatingService
 from app.services.maps import BeatmapSetService
 from app.services.maps import MapsService
 from app.services.performance import PerformanceService
+from app.services.player_leaderboards import PlayerLeaderboardsService
 from app.services.players import PlayersService
 from app.services.replays import ReplayService
 from app.services.score_leaderboards import ScoreLeaderboardsService
@@ -128,6 +130,10 @@ def get_ingame_logins_repository() -> IngameLoginsRepository:
 
 def get_mail_repository() -> MailRepository:
     return MailRepository(app.state.services.database)
+
+
+def get_leaderboard_ranks_repository() -> LeaderboardRanksRepository:
+    return LeaderboardRanksRepository(app.state.services.redis)
 
 
 def get_maps_repository() -> MapsRepository:
@@ -302,14 +308,32 @@ def get_replay_service() -> ReplayService:
     )
 
 
+def get_player_leaderboards_service(
+    stats: Annotated[StatsRepository, Depends(get_stats_repository)],
+    leaderboard_ranks: Annotated[
+        LeaderboardRanksRepository,
+        Depends(get_leaderboard_ranks_repository),
+    ],
+) -> PlayerLeaderboardsService:
+    return PlayerLeaderboardsService(
+        stats=stats,
+        leaderboard_ranks=leaderboard_ranks,
+    )
+
+
 def get_players_service(
     users: Annotated[UsersRepository, Depends(get_users_repository)],
     stats: Annotated[StatsRepository, Depends(get_stats_repository)],
+    player_leaderboards: Annotated[
+        PlayerLeaderboardsService,
+        Depends(get_player_leaderboards_service),
+    ],
 ) -> PlayersService:
     return PlayersService(
         users=users,
         stats=stats,
         online_players=app.state.sessions.players,
+        player_leaderboards=player_leaderboards,
     )
 
 

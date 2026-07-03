@@ -4,14 +4,14 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Protocol
 
-from app.constants.gamemodes import GameMode
 from app.objects.player import Player
-from app.repositories.stats import LeaderboardStatsRow
 from app.repositories.stats import Stat
 from app.repositories.stats import StatsRepository
 from app.repositories.users import SearchUser
 from app.repositories.users import User
 from app.repositories.users import UsersRepository
+from app.services.player_leaderboards import ModeRanks
+from app.services.player_leaderboards import PlayerLeaderboardsService
 
 
 class OnlinePlayers(Protocol):
@@ -55,10 +55,63 @@ class PlayerStatsListing:
 
 
 @dataclass(frozen=True)
+class RankedStat:
+    id: int
+    mode: int
+    tscore: int
+    rscore: int
+    pp: int
+    plays: int
+    playtime: int
+    acc: float
+    max_combo: int
+    total_hits: int
+    replay_views: int
+    xh_count: int
+    x_count: int
+    sh_count: int
+    s_count: int
+    a_count: int
+    # None = unranked for the mode
+    rank: int | None
+    country_rank: int | None
+
+
+@dataclass(frozen=True)
+class RankedStatsListing:
+    stats: list[RankedStat]
+    total_stats: int
+
+
+def _ranked_stat(stat: Stat, ranks: ModeRanks) -> RankedStat:
+    return RankedStat(
+        id=stat.id,
+        mode=stat.mode,
+        tscore=stat.tscore,
+        rscore=stat.rscore,
+        pp=stat.pp,
+        plays=stat.plays,
+        playtime=stat.playtime,
+        acc=stat.acc,
+        max_combo=stat.max_combo,
+        total_hits=stat.total_hits,
+        replay_views=stat.replay_views,
+        xh_count=stat.xh_count,
+        x_count=stat.x_count,
+        sh_count=stat.sh_count,
+        s_count=stat.s_count,
+        a_count=stat.a_count,
+        rank=ranks.global_rank,
+        country_rank=ranks.country_rank,
+    )
+
+
+@dataclass(frozen=True)
 class PlayersService:
     users: UsersRepository
     stats: StatsRepository
     online_players: OnlinePlayers
+    player_leaderboards: PlayerLeaderboardsService
 
     async def search_public_players(self, search: str | None) -> list[SearchUser]:
         return await self.users.search_public(name=search)
@@ -186,19 +239,48 @@ class PlayersService:
     async def fetch_all_player_stats(self, player_id: int) -> list[Stat]:
         return await self.stats.fetch_many(player_id=player_id)
 
-    async def fetch_global_leaderboard(
+    async def fetch_player_mode_stats_with_ranks(
         self,
         *,
-        sort: str,
-        mode: GameMode,
-        limit: int,
-        offset: int,
-        country: str | None,
-    ) -> list[LeaderboardStatsRow]:
-        return await self.stats.fetch_leaderboard_stats_rows(
-            sort=sort,
-            mode=int(mode),
-            limit=limit,
-            offset=offset,
+        player_id: int,
+        mode: int,
+        country: str,
+    ) -> RankedStat | None:
+        stat = await self.stats.fetch_one(player_id, mode)
+        if stat is None:
+            return None
+
+        ranks = await self.player_leaderboards.fetch_player_mode_ranks(
+            player_id=player_id,
+            mode=mode,
             country=country,
+        )
+        return _ranked_stat(stat, ranks)
+
+    async def fetch_player_stats_with_ranks(
+        self,
+        *,
+        player_id: int,
+        country: str,
+        page: int,
+        page_size: int,
+    ) -> RankedStatsListing:
+        listing = await self.fetch_player_stats(
+            player_id=player_id,
+            page=page,
+            page_size=page_size,
+        )
+
+        ranked_stats = []
+        for stat in listing.stats:
+            ranks = await self.player_leaderboards.fetch_player_mode_ranks(
+                player_id=player_id,
+                mode=stat.mode,
+                country=country,
+            )
+            ranked_stats.append(_ranked_stat(stat, ranks))
+
+        return RankedStatsListing(
+            stats=ranked_stats,
+            total_stats=listing.total_stats,
         )
