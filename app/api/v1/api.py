@@ -36,10 +36,10 @@ from app.services.replays import ReplayService
 from app.services.scores import PlayerScoreWithBeatmap
 from app.services.scores import ScoresService
 from app.services.tourney_pools import TourneyPoolsService
+from app.services.visibility import can_view_player
 
 AVATARS_PATH = SystemPath.cwd() / ".data/avatars"
 BEATMAPS_PATH = SystemPath.cwd() / ".data/osu"
-REPLAYS_PATH = SystemPath.cwd() / ".data/osr"
 SCREENSHOTS_PATH = SystemPath.cwd() / ".data/ss"
 
 
@@ -252,7 +252,13 @@ async def api_get_player_info(
         username=username,
     )
 
-    if user_info is None:
+    # the v1 api is anonymous; hidden (restricted or unverified)
+    # players are reported as missing
+    if user_info is None or not can_view_player(
+        viewer=None,
+        target_id=user_info.id,
+        target_priv=user_info.priv,
+    ):
         return ORJSONResponse(
             {"status": "Player not found."},
             status_code=status.HTTP_404_NOT_FOUND,
@@ -365,7 +371,11 @@ async def api_get_player_status(
             username=username,
         )
 
-        if not row:
+        if not row or not can_view_player(
+            viewer=None,
+            target_id=row.id,
+            target_priv=row.priv,
+        ):
             return ORJSONResponse(
                 {"status": "Player not found."},
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -379,6 +389,16 @@ async def api_get_player_status(
                     "last_seen": row.latest_activity,
                 },
             },
+        )
+
+    if not can_view_player(
+        viewer=None,
+        target_id=player.id,
+        target_priv=int(player.priv),
+    ):
+        return ORJSONResponse(
+            {"status": "Player not found."},
+            status_code=status.HTTP_404_NOT_FOUND,
         )
 
     if player.status.map_md5:
@@ -457,7 +477,11 @@ async def api_get_player_scores(
         username=username,
     )
 
-    if not player:
+    if not player or not can_view_player(
+        viewer=None,
+        target_id=player.id,
+        target_priv=int(player.priv),
+    ):
         return ORJSONResponse(
             {"status": "Player not found."},
             status_code=status.HTTP_404_NOT_FOUND,
@@ -590,7 +614,11 @@ async def api_get_player_most_played(
         username=username,
     )
 
-    if not player:
+    if not player or not can_view_player(
+        viewer=None,
+        target_id=player.id,
+        target_priv=int(player.priv),
+    ):
         return ORJSONResponse(
             {"status": "Player not found."},
             status_code=status.HTTP_404_NOT_FOUND,
@@ -730,11 +758,27 @@ async def api_get_score_info(
         ScoresService,
         Depends(api_dependencies.get_scores_service),
     ],
+    players_service: Annotated[
+        PlayersService,
+        Depends(api_dependencies.get_players_service),
+    ],
 ) -> Response:
     """Return information about a given score."""
     score = await scores_service.fetch_score(score_id)
 
     if score is None:
+        return ORJSONResponse(
+            {"status": "Score not found."},
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+    # scores of hidden (restricted or unverified) players are not exposed
+    owner = await players_service.fetch_player(score.userid)
+    if owner is None or not can_view_player(
+        viewer=None,
+        target_id=owner.id,
+        target_priv=owner.priv,
+    ):
         return ORJSONResponse(
             {"status": "Score not found."},
             status_code=status.HTTP_404_NOT_FOUND,
@@ -760,14 +804,14 @@ async def api_get_replay(
     the player's total replay views.
     """
     if not include_headers:
-        replay_file = REPLAYS_PATH / f"{score_id}.osr"
-        if not replay_file.exists():
+        raw_replay_data = await replay_service.fetch_raw_replay(score_id, viewer=None)
+        if raw_replay_data is None:
             return ORJSONResponse(
                 {"status": "Replay not found."},
                 status_code=status.HTTP_404_NOT_FOUND,
             )
         return Response(
-            replay_file.read_bytes(),
+            raw_replay_data,
             media_type="application/octet-stream",
             headers={
                 "Content-Description": "File Transfer",
@@ -775,7 +819,7 @@ async def api_get_replay(
             },
         )
 
-    replay = await replay_service.build_full_replay(score_id)
+    replay = await replay_service.build_full_replay(score_id, viewer=None)
     if replay is None:
         return ORJSONResponse(
             {"status": "Replay not found."},
@@ -900,6 +944,8 @@ async def api_get_clan(
             status_code=status.HTTP_404_NOT_FOUND,
         )
 
+    # hidden (restricted or unverified) members are already excluded by
+    # the service; the owner is omitted from the response when hidden
     clan_members = await clans_service.fetch_clan_members(clan.id)
 
     owner = await players_service.fetch_player_session(
@@ -907,6 +953,11 @@ async def api_get_clan(
         username=None,
     )
     assert owner is not None
+    owner_visible = can_view_player(
+        viewer=None,
+        target_id=owner.id,
+        target_priv=int(owner.priv),
+    )
 
     return ORJSONResponse(
         {
@@ -922,12 +973,16 @@ async def api_get_clan(
                 }
                 for member in clan_members
             ],
-            "owner": {
-                "id": owner.id,
-                "name": owner.name,
-                "country": owner.geoloc["country"]["acronym"],
-                "rank": "Owner",
-            },
+            "owner": (
+                {
+                    "id": owner.id,
+                    "name": owner.name,
+                    "country": owner.geoloc["country"]["acronym"],
+                    "rank": "Owner",
+                }
+                if owner_visible
+                else None
+            ),
         },
     )
 
@@ -969,7 +1024,11 @@ async def api_get_pool(
         username=None,
     )
 
-    if pool_creator is None:
+    if pool_creator is None or not can_view_player(
+        viewer=None,
+        target_id=pool_creator.id,
+        target_priv=int(pool_creator.priv),
+    ):
         return ORJSONResponse(
             {"status": "Pool creator not found."},
             status_code=status.HTTP_404_NOT_FOUND,

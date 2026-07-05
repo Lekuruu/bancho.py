@@ -26,6 +26,9 @@ class _FakeScoresRepository:
         status: int | None = None,
         mode: int | None = None,
         user_id: int | None = None,
+        *,
+        include_hidden_players: bool,
+        always_visible_player_id: int | None = None,
     ) -> int:
         return 0
 
@@ -38,6 +41,9 @@ class _FakeScoresRepository:
         user_id: int | None = None,
         page: int | None = None,
         page_size: int | None = None,
+        *,
+        include_hidden_players: bool,
+        always_visible_player_id: int | None = None,
     ) -> list[Score]:
         return []
 
@@ -209,6 +215,8 @@ class _FakeScoresRepository:
 
     async def fetch_replay_header(self, score_id: int) -> ReplayHeader | None:
         return ReplayHeader(
+            user_id=3,
+            user_priv=3,  # unrestricted & verified
             username="player",
             map_md5="map-md5",
             artist="Artist",

@@ -14,6 +14,7 @@ from fastapi.param_functions import File
 from fastapi.param_functions import Query
 
 from app.api import dependencies as api_dependencies
+from app.api.v2.common import actors
 from app.api.v2.common import responses
 from app.api.v2.common.parameters import GameModeParam
 from app.api.v2.common.parameters import SessionCookie
@@ -29,6 +30,7 @@ from app.api.v2.models.players import SearchPlayer
 from app.api.v2.models.scores import PlayerScore
 from app.api.v2.models.scores import ScoreBeatmap
 from app.constants.gamemodes import GameMode
+from app.repositories.users import User
 from app.services.account_settings import AccountSettingsService
 from app.services.account_settings import PasswordChangeResultCode
 from app.services.avatars import MAX_AVATAR_SIZE_BYTES
@@ -39,6 +41,7 @@ from app.services.players import PlayersService
 from app.services.relationships import AddFriendResult
 from app.services.relationships import RelationshipsService
 from app.services.scores import ScoresService
+from app.services.visibility import can_view_player
 from app.services.web_sessions import WebSessionsService
 
 router = APIRouter()
@@ -55,6 +58,10 @@ async def get_players(
     play_style: int | None = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=100),
+    actor: Annotated[
+        User | None,
+        Depends(actors.get_optional_actor),
+    ],
     players_service: Annotated[
         PlayersService,
         Depends(api_dependencies.get_players_service),
@@ -69,6 +76,7 @@ async def get_players(
         play_style=play_style,
         page=page,
         page_size=page_size,
+        viewer=actor,
     )
 
     response = [Player.model_validate(rec) for rec in listing.players]
@@ -87,10 +95,9 @@ async def get_players(
 async def search_players(
     *,
     query: str = Query(..., alias="q", min_length=2, max_length=32),
-    session_token: SessionCookie = None,
-    web_sessions_service: Annotated[
-        WebSessionsService,
-        Depends(api_dependencies.get_web_sessions_service),
+    actor: Annotated[
+        User | None,
+        Depends(actors.get_optional_actor),
     ],
     players_service: Annotated[
         PlayersService,
@@ -98,11 +105,7 @@ async def search_players(
     ],
 ) -> Success[list[SearchPlayer]] | Failure:
     # staff see hidden players, and players can always find themselves
-    viewer = None
-    if session_token is not None:
-        viewer = await web_sessions_service.fetch_session_user(session_token)
-
-    players = await players_service.search_players(query, viewer=viewer)
+    players = await players_service.search_players(query, viewer=actor)
 
     response = [SearchPlayer.model_validate(rec) for rec in players]
     return responses.success(
@@ -116,6 +119,10 @@ async def get_player(
     player_id_or_name: str,
     key: Literal["id", "username"] | None = None,
     *,
+    actor: Annotated[
+        User | None,
+        Depends(actors.get_optional_actor),
+    ],
     players_service: Annotated[
         PlayersService,
         Depends(api_dependencies.get_players_service),
@@ -143,7 +150,13 @@ async def get_player(
             user_id=None,
             username=player_id_or_name,
         )
-    if data is None:
+    if data is None or not can_view_player(
+        viewer=actor,
+        target_id=data.id,
+        target_priv=data.priv,
+    ):
+        # hidden (restricted or unverified) players are reported as
+        # missing to everyone but staff and themselves
         return responses.failure(
             message="Player not found.",
             status_code=status.HTTP_404_NOT_FOUND,
@@ -239,7 +252,7 @@ async def get_player_friends(
             status_code=status.HTTP_403_FORBIDDEN,
         )
 
-    friends = await relationships_service.fetch_friends(user.id)
+    friends = await relationships_service.fetch_friends(user)
     response = [Player.model_validate(rec) for rec in friends]
     return responses.success(response, meta={"total": len(response)})
 
@@ -278,7 +291,7 @@ async def add_player_friend(
             status_code=status.HTTP_403_FORBIDDEN,
         )
 
-    result = await relationships_service.add_friend(user.id, target_id)
+    result = await relationships_service.add_friend(user, target_id)
     if result is AddFriendResult.CANNOT_FRIEND_SELF:
         return responses.failure(
             message="You cannot friend yourself.",
@@ -334,11 +347,31 @@ async def remove_player_friend(
 @router.get("/players/{player_id}/favourites")
 async def get_player_favourites(
     player_id: int,
+    *,
+    actor: Annotated[
+        User | None,
+        Depends(actors.get_optional_actor),
+    ],
+    players_service: Annotated[
+        PlayersService,
+        Depends(api_dependencies.get_players_service),
+    ],
     favourites_service: Annotated[
         FavouritesService,
         Depends(api_dependencies.get_favourites_service),
     ],
 ) -> Success[list[int]] | Failure:
+    player = await players_service.fetch_player(player_id)
+    if player is None or not can_view_player(
+        viewer=actor,
+        target_id=player.id,
+        target_priv=player.priv,
+    ):
+        return responses.failure(
+            message="Player not found.",
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
     set_ids = await favourites_service.fetch_favourite_set_ids(player_id)
     return responses.success(set_ids, meta={"total": len(set_ids)})
 
@@ -538,11 +571,27 @@ async def update_player_password(
 @router.get("/players/{player_id}/status")
 async def get_player_status(
     player_id: int,
+    *,
+    actor: Annotated[
+        User | None,
+        Depends(actors.get_optional_actor),
+    ],
     players_service: Annotated[
         PlayersService,
         Depends(api_dependencies.get_players_service),
     ],
 ) -> Success[PlayerStatus] | Failure:
+    player = await players_service.fetch_player(player_id)
+    if player is None or not can_view_player(
+        viewer=actor,
+        target_id=player.id,
+        target_priv=player.priv,
+    ):
+        return responses.failure(
+            message="Player status not found.",
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+
     status_data = players_service.fetch_player_status(player_id)
     if status_data is None:
         return responses.failure(
@@ -565,13 +614,22 @@ async def get_player_status(
 async def get_player_mode_stats(
     player_id: int,
     mode: int,
+    *,
+    actor: Annotated[
+        User | None,
+        Depends(actors.get_optional_actor),
+    ],
     players_service: Annotated[
         PlayersService,
         Depends(api_dependencies.get_players_service),
     ],
 ) -> Success[PlayerStats] | Failure:
     player = await players_service.fetch_player(player_id)
-    if player is None:
+    if player is None or not can_view_player(
+        viewer=actor,
+        target_id=player.id,
+        target_priv=player.priv,
+    ):
         return responses.failure(
             message="Player not found.",
             status_code=status.HTTP_404_NOT_FOUND,
@@ -598,13 +656,21 @@ async def get_player_stats(
     *,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=100),
+    actor: Annotated[
+        User | None,
+        Depends(actors.get_optional_actor),
+    ],
     players_service: Annotated[
         PlayersService,
         Depends(api_dependencies.get_players_service),
     ],
 ) -> Success[list[PlayerStats]] | Failure:
     player = await players_service.fetch_player(player_id)
-    if player is None:
+    if player is None or not can_view_player(
+        viewer=actor,
+        target_id=player.id,
+        target_priv=player.priv,
+    ):
         return responses.failure(
             message="Player not found.",
             status_code=status.HTTP_404_NOT_FOUND,
@@ -638,6 +704,10 @@ async def get_player_scores(
     limit: int = Query(25, ge=1, le=100),
     include_loved: bool = False,
     include_failed: bool = True,
+    actor: Annotated[
+        User | None,
+        Depends(actors.get_optional_actor),
+    ],
     players_service: Annotated[
         PlayersService,
         Depends(api_dependencies.get_players_service),
@@ -648,7 +718,11 @@ async def get_player_scores(
     ],
 ) -> Success[list[PlayerScore]] | Failure:
     player = await players_service.fetch_player(player_id)
-    if player is None:
+    if player is None or not can_view_player(
+        viewer=actor,
+        target_id=player.id,
+        target_priv=player.priv,
+    ):
         return responses.failure(
             message="Player not found.",
             status_code=status.HTTP_404_NOT_FOUND,
@@ -695,6 +769,10 @@ async def get_player_most_played(
     *,
     mode: GameModeParam = Query(0),
     limit: int = Query(25, ge=1, le=100),
+    actor: Annotated[
+        User | None,
+        Depends(actors.get_optional_actor),
+    ],
     players_service: Annotated[
         PlayersService,
         Depends(api_dependencies.get_players_service),
@@ -705,7 +783,11 @@ async def get_player_most_played(
     ],
 ) -> Success[list[MostPlayedMap]] | Failure:
     player = await players_service.fetch_player(player_id)
-    if player is None:
+    if player is None or not can_view_player(
+        viewer=actor,
+        target_id=player.id,
+        target_priv=player.priv,
+    ):
         return responses.failure(
             message="Player not found.",
             status_code=status.HTTP_404_NOT_FOUND,
